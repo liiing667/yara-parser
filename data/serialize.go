@@ -17,13 +17,17 @@ func (rs *RuleSet) Serialize() (out string, err error) {
 
 	if len(rs.Includes) > 0 {
 		for _, include := range rs.Includes {
-			b.WriteString(fmt.Sprintf("include \"%s\"\n", include))
+			b.WriteString("include \"")
+			b.WriteString(EscapeYARALiteral(include))
+			b.WriteString("\"\n")
 		}
 		b.WriteRune('\n')
 	}
 	if len(rs.Imports) > 0 {
 		for _, imp := range rs.Imports {
-			b.WriteString(fmt.Sprintf("import \"%s\"\n", imp))
+			b.WriteString("import \"")
+			b.WriteString(EscapeYARALiteral(imp))
+			b.WriteString("\"\n")
 		}
 		b.WriteRune('\n')
 	}
@@ -118,7 +122,7 @@ func (ms *Metas) Serialize() (out string, err error) {
 func (m *Meta) Serialize() (out string, err error) {
 	switch val := m.Val.(type) {
 	case string:
-		out = fmt.Sprintf(`%s = "%s"`, m.Key, val)
+		out = fmt.Sprintf(`%s = "%s"`, m.Key, EscapeYARALiteral(val))
 
 	case int64:
 		out = fmt.Sprintf(`%s = %d`, m.Key, val)
@@ -130,9 +134,14 @@ func (m *Meta) Serialize() (out string, err error) {
 		out = fmt.Sprintf(`%s = %v`, m.Key, val)
 
 	case float64:
-		// grammar says floats are not allowed, so take JSON's float and make
-		// it an int
-		out = fmt.Sprintf(`%s = "%d"`, m.Key, int64(val))
+		// encoding/json decodes every number into float64. YARA meta only
+		// accepts integers, so a whole-number float round-trips as an int.
+		// Fractional values have no legal YARA representation.
+		if val != float64(int64(val)) {
+			err = fmt.Errorf("meta %q: YARA does not support fractional number %v", m.Key, val)
+			return
+		}
+		out = fmt.Sprintf(`%s = %d`, m.Key, int64(val))
 
 	default:
 		err = fmt.Errorf(`Unsupported meta value type "%s"`, val)
@@ -174,10 +183,13 @@ func (s *String) Serialize() (out string, err error) {
 	var (
 		encapsOpen  string
 		encapsClose string
+		text        = s.Text
 	)
 	switch t := s.Type; t {
 	case TypeString:
-		encapsOpen, encapsClose = `"`, `"`
+		encapsOpen = `"`
+		encapsClose = `"`
+		text = EscapeYARALiteral(text)
 
 	case TypeHexString:
 		if s.Modifiers.Xor != nil {
@@ -191,6 +203,7 @@ func (s *String) Serialize() (out string, err error) {
 			err = NewYARAError(ErrInvalidStringModifierCombo, "regex with xor")
 			return
 		}
+		text = EscapeYARARegex(text)
 		encapsOpen = "/"
 		var closeBuilder strings.Builder
 		closeBuilder.WriteRune('/')
@@ -208,8 +221,11 @@ func (s *String) Serialize() (out string, err error) {
 	}
 
 	mods, err := s.Modifiers.Serialize()
+	if err != nil {
+		return
+	}
 
-	out = fmt.Sprintf(format, s.ID, encapsOpen, s.Text, encapsClose, mods)
+	out = fmt.Sprintf(format, s.ID, encapsOpen, text, encapsClose, mods)
 
 	return
 }
@@ -222,7 +238,7 @@ func (m *StringModifiers) Serialize() (out string, err error) {
 		return
 	}
 
-	const modsAvailable = 4 // TODO: update
+	const modsAvailable = 8
 	modifiers := make([]string, 0, modsAvailable)
 	if m.ASCII {
 		modifiers = append(modifiers, "ascii")
@@ -248,13 +264,43 @@ func (m *StringModifiers) Serialize() (out string, err error) {
 	}
 	if m.Base64 != nil {
 		var b64 string
-		b64, err = m.Base64.Serialize()
-		if b64 != "" && err == nil {
-			modifiers = append(modifiers, b64)
+		b64, err = m.Base64.serialize("base64")
+		if err != nil {
+			return
 		}
+		modifiers = append(modifiers, b64)
+	}
+	if m.Base64Wide != nil {
+		var b64wide string
+		b64wide, err = m.Base64Wide.serialize("base64wide")
+		if err != nil {
+			return
+		}
+		modifiers = append(modifiers, b64wide)
 	}
 
 	out = strings.Join(modifiers, " ")
+	return
+}
+
+// serialize renders a base64-family modifier using the given keyword
+// ("base64" or "base64wide"). A nil value yields an empty string and no
+// error; a zero-length value yields the bare keyword; a 64-byte value is
+// emitted as keyword("<alphabet>").
+func (b64 Base64) serialize(keyword string) (out string, err error) {
+	if b64 == nil {
+		return
+	}
+
+	switch len(b64) {
+	case 0:
+		out = keyword
+	case 64:
+		out = fmt.Sprintf(`%s("%s")`, keyword, EscapeYARALiteral(string(b64)))
+	default:
+		err = fmt.Errorf(`%s modifier requires no alphabet or a 64-char alphabet`, keyword)
+	}
+
 	return
 }
 
@@ -265,26 +311,7 @@ func (m *StringModifiers) Serialize() (out string, err error) {
 // an alphabet. If the Base64 is not zero-length, it must be 64 bytes
 // representing a 64-character alphabet
 func (b64 Base64) Serialize() (out string, err error) {
-	if b64 == nil {
-		return
-	}
-
-	switch len(b64) {
-	case 0:
-		out = "base64"
-	case 64:
-		alphabet := string(b64)
-		if len(alphabet) != 64 {
-			err = fmt.Errorf(`base64 alphabet must be 64 chars`)
-		} else {
-			out = fmt.Sprintf(`base64("%s")`, string(b64))
-		}
-		// should we be checking for 64 unique, printable ASCII chars?
-	default:
-		err = fmt.Errorf(`base64 modifier requires no alphabet or a 64-char alphabet`)
-	}
-
-	return
+	return b64.serialize("base64")
 }
 
 // Validate returns an error that can be unwrapped to

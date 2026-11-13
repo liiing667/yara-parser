@@ -220,4 +220,6 @@ As you make changes to the grammar, you can then run `make grammar`.  The .go fi
 
 ## Limitations
 
-Currently, there are no guarantees with the library that modified rules will serialize back into a valid YARA ruleset.  For example, you can set `rule.Identifier = "123"`, but this would be invalid YARA.  Additionally, adding or removing strings may cause a condition to become invalid, and conditions are currently treated only as text.  Comments also cannot be retained.
+There are still no guarantees for identifiers or structure: you can set `rule.Identifier = "123"`, which is invalid YARA, and adding or removing strings may make a condition invalid because conditions are treated only as text.  Comments also cannot be retained.
+
+The contents of double-quoted text (meta values, plain strings, include/import paths and base64 alphabets) and regex bodies are, however, serialized with deterministic, reversible escaping.  Quotes, backslashes, line breaks and control bytes are encoded using YARA's escape vocabulary (`\"`, `\\`, `\n`, `\t`, `\xHH`), valid escapes already present in parsed source are preserved verbatim, and the transformation is a fixed point, so parsing and re-serializing a ruleset produces identical text.  Hex strings, regex modifiers and condition text are emitted unchanged.
